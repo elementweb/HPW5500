@@ -49,6 +49,7 @@ class HPW5500 {
     public: HPW5500_PHY_status_t status;
 
     public: bool configure();
+    public: bool applyNetworkConfig(bool force = false);
     public: bool connected();
     public: void overrideConfiguration(bool (*callback)(HPW5500 *obj));
     public: bool checkConfiguration();
@@ -111,7 +112,9 @@ class HPW5500 {
 
     public: void writePacket(uint8_t socket, uint8_t *data, uint16_t length);
     public: uint16_t currentPacketSize(uint8_t socket);
+    public: uint16_t bufferSize(uint8_t socket);
     public: bool sendPacket(uint8_t socket, uint8_t *ip = nullptr, uint16_t port = 0);
+    public: bool waitForSend(uint8_t socket, uint32_t max_polls = 200000);
     HPW5500_SECURE_METHODS: HPW5500_socketProtocol_t socketProtocol(uint8_t socket);
 
     /** 
@@ -143,6 +146,7 @@ class HPW5500 {
     public: void onMessage(HPW5500_socket_receive_callback_t callback = nullptr);
     public: void onMessage(uint8_t socket, HPW5500_socket_receive_callback_t callback = nullptr);
     public: void onMessage(HPW5500_socket_handle_t *handle, HPW5500_socket_receive_callback_t callback = nullptr);
+    public: HPW5500_socket_receive_callback_t swapMessageCallback(uint8_t socket, HPW5500_socket_receive_callback_t callback = nullptr);
     public: void onConnect(HPW5500_socket_connect_callback_t callback = nullptr);
     public: void onConnect(uint8_t socket, HPW5500_socket_connect_callback_t callback = nullptr);
     public: void onConnect(HPW5500_socket_handle_t *handle, HPW5500_socket_connect_callback_t callback = nullptr);

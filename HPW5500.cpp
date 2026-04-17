@@ -112,6 +112,18 @@ bool HPW5500::configure() {
     return true;
 }
 
+bool HPW5500::applyNetworkConfig(bool force) {
+    // Not connected?
+    if(!force && !deviceConnected) return false;
+
+    // Apply IP configuration to registers
+    write(HPW5500_COM_SIPR, configuration.ip, 4);
+    write(HPW5500_COM_SUBR, configuration.subnet, 4);
+    write(HPW5500_COM_GAR, configuration.gateway, 4);
+
+    return true;
+}
+
 bool HPW5500::connected() {
     return deviceConnected;
 }
@@ -364,8 +376,14 @@ bool HPW5500::configureSocket(uint8_t number, HPW5500_socketProtocol_t protocol,
 }
 
 HPW5500_socket_init_attempt_t HPW5500::open(HPW5500_socket_handle_t *handle, HPW5500_socketProtocol_t protocol, uint16_t port, uint8_t socketCount, bool reopen_on_closed) {
+    // Excuse me?
+    if(protocol == HPW5500_SOCKET_PROTOCOL_CLOSED) return HPW5500_SOCKET_OPEN_FAILED_CONFIGURATION;
+    
     // Can't do this to me
     if(socketCount < 1 || socketCount > 8) return HPW5500_SOCKET_OPEN_FAILED_OUT_OF_RANGE;
+
+    // UDP and MACRAW can't be opened on multiple sockets at once
+    if((protocol == HPW5500_SOCKET_PROTOCOL_UDP || protocol == HPW5500_SOCKET_PROTOCOL_MACRAW) && socketCount > 1) return HPW5500_SOCKET_OPEN_FAILED_MACRAW_UDP_MULTIPLE_SOCKETS;
 
     // Select free sockets
     uint16_t free_sockets = selectFreeSockets(socketCount, protocol == HPW5500_SOCKET_PROTOCOL_MACRAW);
@@ -383,6 +401,7 @@ HPW5500_socket_init_attempt_t HPW5500::open(HPW5500_socket_handle_t *handle, HPW
     // Reset handle to defaults
     *handle = 0x00;
 
+    // Now iterate through sockets and open them; multiple sockets only for TCP, in all other cases below loop will run only once
     for(uint8_t socket = 0; socket<HPW5500_SOCKET_MAX; socket++) {
         // Check if socket is selected
         if(((free_sockets >> socket) & 0x1) != 0x1) continue;
@@ -396,7 +415,9 @@ HPW5500_socket_init_attempt_t HPW5500::open(HPW5500_socket_handle_t *handle, HPW
         // TCP protocol
         if(protocol == HPW5500_socketProtocol_t::HPW5500_SOCKET_PROTOCOL_TCP) {
             // Should socket be reopened in case it is closed? Will apply in TCP mode only
-            sockets[socket].tcp_reopen_onclose = protocol == HPW5500_socketProtocol_t::HPW5500_SOCKET_PROTOCOL_TCP ? reopen_on_closed : false;
+            sockets[socket].tcp_reopen_onclose = reopen_on_closed;
+            sockets[socket].tcp_reopen_onclose_times = reopen_on_closed ? 255 : 0;
+            sockets[socket].tcp_reopen_onclose_attempts = 0;
 
             // Socket is acting as TCP server
             sockets[socket].tcp_server = true;
@@ -427,8 +448,10 @@ HPW5500_socket_handle_t HPW5500::close(HPW5500_socket_handle_t *handle) {
         // Check if we are talking about the right socket here
         if(((*handle >> socket) & 0x1) != 0b1) continue;
 
-        // Do nothing if socket is not in listed state
-        if(socketStatus(socket) != HPW5500_SOCKET_STATUS::LISTEN) continue;
+        uint8_t status = socketStatus(socket);
+
+        // Do nothing if socket is already closed
+        if(status == HPW5500_SOCKET_STATUS::CLOSED) continue;
 
         // For TCP; set to not re-open in case this was set
         sockets[socket].tcp_reopen_onclose = false;
@@ -707,8 +730,8 @@ void HPW5500::handleSocketEvents(uint8_t socket) {
     // Nothing to process?
     if(HPW5500_REG_READ(snir, HPW5500_USABLE_SN_IR) == HPW5500_USABLE_SN_IR) return;
 
-    // If parents exist, find pointer to event callback
-    HPW5500_socket_event_callbacks_t *socket_events = &sockets[HPW5500_bitOffset(socket)].events;
+    // Socket index is already 0-7, no bit offset needed
+    HPW5500_socket_event_callbacks_t *socket_events = &sockets[socket].events;
 
     // SEND_OK event
     if(HPW5500_REG_READ(snir, HPW5500_MASK_SN_IR_SEND_OK)) {
@@ -786,9 +809,9 @@ void HPW5500::handleSocketEvents(uint8_t socket) {
             HPW5500_SAFE_TO_EXECUTE(global_socket_events.socketDisconnect, socket);
 
             // TCP server; in case re-open is required; issue commands and call used defined callback function
-            if(sockets[socket].socket_protocol == HPW5500_SOCKET_PROTOCOL_TCP && sockets[socket].tcp_server && sockets[socket].tcp_reopen_onclose && sockets[socket].tcp_reopen_onclose_attempts < sockets[socket].tcp_reopen_onclose_times) {
-                // Increment counter
-                sockets[socket].tcp_reopen_onclose_attempts++;
+            if(sockets[socket].socket_protocol == HPW5500_SOCKET_PROTOCOL_TCP && sockets[socket].tcp_server && sockets[socket].tcp_reopen_onclose) {
+                // Reset attempt counter for servers (they should accept connections indefinitely)
+                sockets[socket].tcp_reopen_onclose_attempts = 0;
 
                 // Re-issue open and listen commands
                 write8(HPW5500_COM_SN_CR(socket), HPW5500_SOCKET_CMD::OPEN);
@@ -953,6 +976,10 @@ uint16_t HPW5500::currentPacketSize(uint8_t socket) {
     return sockets[socket].offset_tracer;
 }
 
+uint16_t HPW5500::bufferSize(uint8_t socket) {
+    return sockets[socket].buffer_size;
+}
+
 bool HPW5500::sendPacket(uint8_t socket, uint8_t *ip, uint16_t port) {
     uint8_t status = socketStatus(socket);
 
@@ -980,6 +1007,24 @@ bool HPW5500::sendPacket(uint8_t socket, uint8_t *ip, uint16_t port) {
     sockets[socket].offset_tracer = 0;
 
     return true;
+}
+
+bool HPW5500::waitForSend(uint8_t socket, uint32_t max_polls) {
+    for(uint32_t i = 0; i < max_polls; i++) {
+        uint8_t snir = read8(HPW5500_COM_SN_IR(socket));
+
+        if(snir & HPW5500_MASK_SN_IR_SEND_OK) {
+            write8(HPW5500_COM_SN_IR(socket), HPW5500_MASK_SN_IR_SEND_OK);
+            return true;
+        }
+
+        if(snir & HPW5500_MASK_SN_IR_TIMEOUT) {
+            write8(HPW5500_COM_SN_IR(socket), HPW5500_MASK_SN_IR_TIMEOUT);
+            return false;
+        }
+    }
+    
+    return false;
 }
 
 HPW5500_socketProtocol_t HPW5500::socketProtocol(uint8_t socket) {
@@ -1120,6 +1165,15 @@ void HPW5500::onMessage(uint8_t socket, HPW5500_socket_receive_callback_t callba
 void HPW5500::onMessage(HPW5500_socket_handle_t *handle, HPW5500_socket_receive_callback_t callback) {
     // Register per-socket callback
     onMessage(HPW5500_bitOffset(*handle), callback);
+}
+
+HPW5500_socket_receive_callback_t HPW5500::swapMessageCallback(uint8_t socket, HPW5500_socket_receive_callback_t callback) {
+    if(socket >= HPW5500_SOCKET_MAX) return nullptr;
+
+    HPW5500_socket_receive_callback_t previous = sockets[socket].events.socketMessageReceive;
+    sockets[socket].events.socketMessageReceive = callback;
+
+    return previous;
 }
 
 void HPW5500::onConnect(HPW5500_socket_connect_callback_t callback) {

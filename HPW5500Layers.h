@@ -18,3 +18,5 @@
  */
 
 #define HPW5500_DELAY_ARDUINO [](uint16_t delay_ms) { delay(delay_ms); }
+
+#define HPW5500_DELAY_FREERTOS [](uint16_t delay_ms) { vTaskDelay(pdMS_TO_TICKS(delay_ms)); }

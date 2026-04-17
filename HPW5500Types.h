@@ -66,8 +66,9 @@ typedef enum: uint8_t {
     HPW5500_SOCKET_OPEN_FAILED_MACRAW_SOCKET_BUSY = 0x03,
     HPW5500_SOCKET_OPEN_FAILED_OUT_OF_RANGE = 0x04,
     HPW5500_SOCKET_OPEN_FAILED_NO_SOCKETS_OPENED = 0x05,
+    HPW5500_SOCKET_OPEN_FAILED_MACRAW_UDP_MULTIPLE_SOCKETS = 0x06,
 
-    HPW5500_SOCKET_OPEN_FAILED_CONFIGURATION = 0x06,
+    HPW5500_SOCKET_OPEN_FAILED_CONFIGURATION = 0x07,
 }
 HPW5500_socket_init_attempt_t;
 
@@ -145,6 +146,16 @@ typedef void (*HPW5500_socket_reopen_callback_t) (uint8_t socket, bool dueToTime
 typedef void (*HPW5500_socket_connect_callback_t) (uint8_t socket, uint8_t *ip, uint16_t port);
 typedef void (*HPW5500_socket_receive_callback_t) (uint8_t socket, HPW5500_packet_t packet);
 typedef uint8_t (*HPW5500_socket_giveup_callback_t) (uint8_t socket, uint8_t attempts);
+
+// Define HPW5500_USE_MILLIS64 before including this header to use 64-bit millis timestamps
+#ifdef HPW5500_USE_MILLIS64
+typedef uint64_t HPW5500_millis_t;
+#else
+typedef uint32_t HPW5500_millis_t;
+#endif
+
+typedef HPW5500_millis_t (*HPW5500_millis_callback_t)();
+typedef void (*HPW5500_delay_callback_t)(uint16_t ms);
 
 // Callback pointer storage for general events
 typedef struct {
