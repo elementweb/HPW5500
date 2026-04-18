@@ -179,6 +179,10 @@ bool HPW5500WebSocketServer::handleHandshake(uint8_t socket, const uint8_t *data
         }
     }
 
+    // Extract Cookie header
+    connections[socket].cookie[0] = '\0';
+    parse_header_value(text, "Cookie:", connections[socket].cookie, sizeof(connections[socket].cookie));
+
     char key[64] = { 0 };
     if(!parse_header_value(text, "Sec-WebSocket-Key:", key, sizeof(key))) return false;
 
@@ -300,6 +304,12 @@ const char *HPW5500WebSocketServer::getPath(uint8_t socket) const {
     if(socket >= HPW5500_SOCKET_MAX) return "/";
     if(((socket_handle >> socket) & 0x1) != 0x1) return "/";
     return connections[socket].path;
+}
+
+const char *HPW5500WebSocketServer::getCookie(uint8_t socket) const {
+    if(socket >= HPW5500_SOCKET_MAX) return "";
+    if(((socket_handle >> socket) & 0x1) != 0x1) return "";
+    return connections[socket].cookie;
 }
 
 bool HPW5500WebSocketServer::sendFrame(uint8_t socket, uint8_t opcode, const uint8_t *data, uint16_t length, bool mask) {

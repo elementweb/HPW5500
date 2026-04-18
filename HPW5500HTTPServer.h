@@ -20,6 +20,7 @@ enum class HPW5500HttpMethod : uint8_t {
 struct HPW5500HttpRequest {
     HPW5500HttpMethod method = HPW5500HttpMethod::UNKNOWN;
     char path[128] = { 0 };
+    char cookie[64] = { 0 };
     const uint8_t *body = nullptr;
     uint16_t body_length = 0;
     const uint8_t *raw = nullptr;

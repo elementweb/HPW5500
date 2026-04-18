@@ -230,6 +230,22 @@ bool HPW5500HTTPServer::parseRequest(const uint8_t *buffer, uint16_t length, HPW
 
     std::strncpy(request.path, path_buf, sizeof(request.path) - 1);
 
+    // Extract Cookie header value
+    request.cookie[0] = '\0';
+    const char *ck = std::strstr(data, "Cookie:");
+    if(ck == nullptr) ck = std::strstr(data, "cookie:");
+    if(ck != nullptr) {
+        ck += 7;
+        while(*ck == ' ') ck++;
+        const char *ck_end = std::strstr(ck, "\r\n");
+        if(ck_end != nullptr) {
+            uint16_t ck_len = static_cast<uint16_t>(ck_end - ck);
+            if(ck_len >= sizeof(request.cookie)) ck_len = sizeof(request.cookie) - 1;
+            std::memcpy(request.cookie, ck, ck_len);
+            request.cookie[ck_len] = '\0';
+        }
+    }
+
     const char *body_start = std::strstr(data, "\r\n\r\n");
     if(body_start == nullptr) {
         request.body = nullptr;

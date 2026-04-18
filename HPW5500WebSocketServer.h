@@ -30,13 +30,15 @@ class HPW5500WebSocketServer {
     public: bool sendClose(uint8_t socket);
 
     public: const char *getPath(uint8_t socket) const;
+    public: const char *getCookie(uint8_t socket) const;
 
     private: struct ConnectionState {
         bool handshake_done = false;
         uint8_t frag_opcode = 0;
         uint16_t frag_len = 0;
         uint8_t frag_buffer[2048];
-        char path[32];
+        char path[48];
+        char cookie[64];
     };
 
     private: static constexpr uint16_t HPW5500_WS_MAX_FRAME = 2048;
