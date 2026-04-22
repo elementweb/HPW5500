@@ -406,8 +406,9 @@ HPW5500_socket_init_attempt_t HPW5500::open(HPW5500_socket_handle_t *handle, HPW
         // Check if socket is selected
         if(((free_sockets >> socket) & 0x1) != 0x1) continue;
 
-        // Configure socket
-        if(!configureSocket(socket, protocol, port)) continue;
+        // Configure socket (enable No Delayed ACK for TCP — equivalent of TCP_NODELAY)
+        bool nd = (protocol == HPW5500_SOCKET_PROTOCOL_TCP);
+        if(!configureSocket(socket, protocol, port, false, false, nd)) continue;
 
         // Update handle
         *handle |= 1 << socket;
@@ -556,7 +557,7 @@ uint16_t HPW5500::selectFreeSockets(uint8_t socketCount, bool macRaw) {
     uint8_t available = 0;
 
     // Iterate through all other sockets [7 → 0] and return the first one that is free
-    for(uint8_t socket=HPW5500_SOCKET_MAX-1; socket>=0; socket--) {
+    for(int8_t socket=HPW5500_SOCKET_MAX-1; socket>=0; socket--) {
         // Check if socket is free/closed
         if(socketStatus(socket) == HPW5500_SOCKET_STATUS::CLOSED) {
             // Mark socket as selected and increment available counter
@@ -599,6 +600,33 @@ uint16_t HPW5500::portAutoSelect() {
 uint8_t HPW5500::socketStatus(uint8_t socket) {
     // Query status
     return read8(HPW5500_COM_SN_SR(socket));
+}
+
+void HPW5500::waitForCmdDone(uint8_t socket) {
+    for(uint8_t i = 0; i < 200; i++) {
+        if(read8(HPW5500_COM_SN_CR(socket)) == 0x00) return;
+    }
+}
+
+void HPW5500::dropSocket(uint8_t socket) {
+    if(socket >= HPW5500_SOCKET_MAX) return;
+    uint8_t sr_before = read8(HPW5500_COM_SN_SR(socket));
+    write8(HPW5500_COM_SN_CR(socket), HPW5500_SOCKET_CMD::CLOSE);
+    waitForCmdDone(socket);
+    uint8_t sr_after = read8(HPW5500_COM_SN_SR(socket));
+}
+
+void HPW5500::reopenSocket(uint8_t socket) {
+    if(socket >= HPW5500_SOCKET_MAX) return;
+    sockets[socket].offset_tracer = 0;
+    write8(HPW5500_COM_SN_CR(socket), HPW5500_SOCKET_CMD::OPEN);
+    waitForCmdDone(socket);
+    uint8_t sr_open = read8(HPW5500_COM_SN_SR(socket));
+    if(sockets[socket].tcp_server) {
+        write8(HPW5500_COM_SN_CR(socket), HPW5500_SOCKET_CMD::LISTEN);
+        waitForCmdDone(socket);
+    }
+    uint8_t sr_final = read8(HPW5500_COM_SN_SR(socket));
 }
 
 HPW5500_socket_handle_t HPW5500::killAll() {
@@ -764,6 +792,26 @@ void HPW5500::handleSocketEvents(uint8_t socket) {
                 if(sockets[socket].events.socketConnectionTimeoutGiveUp != nullptr) socketAttemptToReconnectTCP(socket, true, sockets[socket].events.socketConnectionTimeoutGiveUp(socket, sockets[socket].tcp_reopen_ontimeout_attempts));
             }
         }
+
+        // TCP server; timeout means peer disappeared — re-open socket to accept new connections
+        if(sockets[socket].socket_protocol == HPW5500_SOCKET_PROTOCOL_TCP && sockets[socket].tcp_server) {
+            uint8_t status = socketStatus(socket);
+            if(status == HPW5500_SOCKET_STATUS::CLOSED) {
+                // Fire disconnect callbacks so upper layers (e.g. WebSocket server) clean up
+                HPW5500_SAFE_TO_EXECUTE(socket_events->socketDisconnect, socket);
+                HPW5500_SAFE_TO_EXECUTE(global_socket_events.socketDisconnect, socket);
+
+                if(sockets[socket].tcp_reopen_onclose) {
+                    sockets[socket].tcp_reopen_onclose_attempts = 0;
+                    write8(HPW5500_COM_SN_CR(socket), HPW5500_SOCKET_CMD::OPEN);
+                    waitForCmdDone(socket);
+                    write8(HPW5500_COM_SN_CR(socket), HPW5500_SOCKET_CMD::LISTEN);
+                    waitForCmdDone(socket);
+                    HPW5500_SAFE_TO_EXECUTE(socket_events->socketReopen, socket, true);
+                    HPW5500_SAFE_TO_EXECUTE(global_socket_events.socketReopen, socket, true);
+                }
+            }
+        }
     }
 
     // CON event
@@ -800,6 +848,10 @@ void HPW5500::handleSocketEvents(uint8_t socket) {
         if(status == HPW5500_SOCKET_STATUS::CLOSE_WAIT) {
             // Command socket to disconnect from peer
             write8(HPW5500_COM_SN_CR(socket), HPW5500_SOCKET_CMD::DISCON);
+            waitForCmdDone(socket);
+
+            // Re-read status — DISCON often completes instantly when peer already closed
+            status = socketStatus(socket);
         }
 
         // Event was triggered after connection was closed completely
@@ -815,7 +867,9 @@ void HPW5500::handleSocketEvents(uint8_t socket) {
 
                 // Re-issue open and listen commands
                 write8(HPW5500_COM_SN_CR(socket), HPW5500_SOCKET_CMD::OPEN);
+                waitForCmdDone(socket);
                 write8(HPW5500_COM_SN_CR(socket), HPW5500_SOCKET_CMD::LISTEN);
+                waitForCmdDone(socket);
 
                 // User provided callbacks; notify that socket was reopened
                 HPW5500_SAFE_TO_EXECUTE(socket_events->socketReopen, socket, false);
@@ -829,6 +883,7 @@ void HPW5500::handleSocketEvents(uint8_t socket) {
 
                 // Re-issue open and connect commands
                 write8(HPW5500_COM_SN_CR(socket), HPW5500_SOCKET_CMD::OPEN);
+                waitForCmdDone(socket);
                 write8(HPW5500_COM_SN_CR(socket), HPW5500_SOCKET_CMD::CONNECT);
 
                 // User provided callbacks; notify that socket was reopened
@@ -863,8 +918,8 @@ void HPW5500::handleSocketReceiveEventUDPorMACRAW(uint8_t socket, uint16_t *poin
 }
 
 void HPW5500::handleSocketReceiveEventTCP(uint8_t socket, uint16_t *pointer, HPW5500_packet_t *packet, uint16_t size, bool copyData) {
-    // Determine packet payload size
-    packet->length = size;
+    // Cap read to payload buffer size to prevent overflow
+    packet->length = size > HPW5500_MTU ? HPW5500_MTU : size;
 
     // Proceed if there is callback function to be invoked later
     if(copyData) {
@@ -878,7 +933,7 @@ void HPW5500::handleSocketReceiveEventTCP(uint8_t socket, uint16_t *pointer, HPW
         read(*pointer, HPW5500_REGISTER_BLOCK_SOCK_RX(socket), packet->payload, packet->length);
     }
 
-    // Update pointer
+    // Advance pointer by actual amount consumed (capped)
     write16(HPW5500_COM_SN_RX_RD(socket), *pointer + packet->length);
 }
 
@@ -941,6 +996,7 @@ void HPW5500::socketAttemptToReconnectTCP(uint8_t socket, bool restart, uint8_t 
 
     // Re-open socket
     write8(HPW5500_COM_SN_CR(socket), HPW5500_SOCKET_CMD::OPEN);
+    waitForCmdDone(socket);
     
     // Attempt to establish a connection
     write8(HPW5500_COM_SN_CR(socket), HPW5500_SOCKET_CMD::CONNECT);
@@ -980,8 +1036,17 @@ uint16_t HPW5500::bufferSize(uint8_t socket) {
     return sockets[socket].buffer_size;
 }
 
+uint16_t HPW5500::txFreeSize(uint8_t socket) {
+    return read16(HPW5500_COM_SN_TX_FSR(socket));
+}
+
 bool HPW5500::sendPacket(uint8_t socket, uint8_t *ip, uint16_t port) {
     uint8_t status = socketStatus(socket);
+
+    // Retry once on obviously invalid status (SPI glitch — 0xFF is never a valid SR value)
+    if(status == 0xFF) {
+        status = socketStatus(socket);
+    }
 
     if(sockets[socket].socket_protocol == HPW5500_SOCKET_PROTOCOL_UDP) {
         // Check if port and IP are supplied
@@ -998,10 +1063,19 @@ bool HPW5500::sendPacket(uint8_t socket, uint8_t *ip, uint16_t port) {
     }
 
     // Check if connection is established within TCP mode
-    if(sockets[socket].socket_protocol == HPW5500_SOCKET_PROTOCOL_TCP && status != HPW5500_SOCKET_STATUS::ESTABLISHED) return false;
+    if(sockets[socket].socket_protocol == HPW5500_SOCKET_PROTOCOL_TCP && status != HPW5500_SOCKET_STATUS::ESTABLISHED) {
+        return false;
+    }
+
+    // Clear stale SEND_OK from any previous send
+    uint8_t snir = read8(HPW5500_COM_SN_IR(socket));
+    if(snir & HPW5500_MASK_SN_IR_SEND_OK) {
+        write8(HPW5500_COM_SN_IR(socket), HPW5500_MASK_SN_IR_SEND_OK);
+    }
 
     // Order SEND command
     write8(HPW5500_COM_SN_CR(socket), HPW5500_SOCKET_CMD::SEND);
+    waitForCmdDone(socket);
 
     // Reset offset
     sockets[socket].offset_tracer = 0;
@@ -1009,8 +1083,8 @@ bool HPW5500::sendPacket(uint8_t socket, uint8_t *ip, uint16_t port) {
     return true;
 }
 
-bool HPW5500::waitForSend(uint8_t socket, uint32_t max_polls) {
-    for(uint32_t i = 0; i < max_polls; i++) {
+bool HPW5500::waitForSend(uint8_t socket, uint32_t timeout_ms) {
+    for(uint32_t i = 0; i < timeout_ms; i++) {
         uint8_t snir = read8(HPW5500_COM_SN_IR(socket));
 
         if(snir & HPW5500_MASK_SN_IR_SEND_OK) {
@@ -1019,11 +1093,17 @@ bool HPW5500::waitForSend(uint8_t socket, uint32_t max_polls) {
         }
 
         if(snir & HPW5500_MASK_SN_IR_TIMEOUT) {
-            write8(HPW5500_COM_SN_IR(socket), HPW5500_MASK_SN_IR_TIMEOUT);
+            // Don't clear TIMEOUT here — let handleSocketEvents process it
             return false;
         }
+
+        if(snir & HPW5500_MASK_SN_IR_DISCON) {
+            // Peer disconnected — bail out, let handleSocketEvents handle cleanup
+            return false;
+        }
+
     }
-    
+
     return false;
 }
 

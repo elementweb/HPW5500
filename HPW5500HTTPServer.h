@@ -30,17 +30,25 @@ struct HPW5500HttpRequest {
 class HPW5500HTTPServer {
     public: typedef void (*HPW5500_http_handler_t)(uint8_t socket, const HPW5500HttpRequest &request, HPW5500HTTPServer *server);
 
+    // Opaque token returned by schedule_fn and passed back to cancel_fn.
+    // schedule_fn(delay_ms, cb, arg): schedules cb(arg) after delay_ms; returns token.
+    // cancel_fn(token): cancels a pending timer. No-op if token is nullptr or already fired.
+    typedef void *HPW5500_http_timer_token_t;
+    typedef HPW5500_http_timer_token_t (*HPW5500_http_schedule_t)(uint32_t delay_ms, void(*cb)(void *), void *arg);
+    typedef void (*HPW5500_http_cancel_t)(HPW5500_http_timer_token_t token);
+
     public: explicit HPW5500HTTPServer(HPW5500 *device = nullptr);
 
-    public: bool begin(uint16_t port, uint8_t socket_count = 1);
+    public: bool begin(uint16_t port, uint8_t socket_count = 1, uint32_t idle_ms = 3000);
     public: void end();
     public: void attach(HPW5500 *device);
+    public: void setTimerCallbacks(HPW5500_http_schedule_t schedule, HPW5500_http_cancel_t cancel);
 
     public: bool addRoute(HPW5500HttpMethod method, const char *path, HPW5500_http_handler_t handler);
     public: void setNotFoundHandler(HPW5500_http_handler_t handler);
     public: void registerExampleRoutes();
 
-    public: bool sendResponse(uint8_t socket, uint16_t status_code, const char *content_type, const uint8_t *body, uint16_t body_length, const char *extra_headers = nullptr);
+    public: bool sendResponse(uint8_t socket, uint16_t status_code, const char *content_type, const uint8_t *body, uint16_t body_length, const char *extra_headers = nullptr, bool keepAlive = false);
     public: bool sendText(uint8_t socket, uint16_t status_code, const char *text);
     public: bool sendNotFound(uint8_t socket);
     public: bool sendBadRequest(uint8_t socket);
@@ -53,13 +61,17 @@ class HPW5500HTTPServer {
     };
 
     private: static constexpr uint16_t HPW5500_HTTP_MAX_REQUEST = 1024;
-    private: static constexpr uint8_t HPW5500_HTTP_MAX_ROUTES = 8;
+    private: static constexpr uint8_t  HPW5500_HTTP_MAX_ROUTES  = 8;
 
     private: static void handlePacket(uint8_t socket, HPW5500_packet_t packet);
+    private: static void onIdleTimer(void *arg);
     private: void processPacket(uint8_t socket, const HPW5500_packet_t &packet);
 
     private: bool parseRequest(const uint8_t *buffer, uint16_t length, HPW5500HttpRequest &request);
     private: HPW5500_http_handler_t findHandler(HPW5500HttpMethod method, const char *path) const;
+
+    private: void cancelIdleTimer(uint8_t socket);
+    private: void scheduleIdleTimer(uint8_t socket);
 
     private: HPW5500 *device = nullptr;
     private: HPW5500_socket_handle_t socket_handle = 0x00;
@@ -71,6 +83,11 @@ class HPW5500HTTPServer {
     private: HPW5500_http_handler_t not_found_handler = nullptr;
 
     private: uint8_t rx_buffer[HPW5500_HTTP_MAX_REQUEST];
+
+    private: uint32_t _idle_ms = 3000;
+    private: HPW5500_http_schedule_t _schedule_fn = nullptr;
+    private: HPW5500_http_cancel_t   _cancel_fn   = nullptr;
+    private: HPW5500_http_timer_token_t idle_tokens[HPW5500_SOCKET_MAX] = { };
 
     private: static HPW5500HTTPServer *instance_by_socket[HPW5500_SOCKET_MAX];
 };

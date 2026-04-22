@@ -11,9 +11,6 @@
 #include <HPW5500Registers.h>
 #include <HPW5500Types.h>
 
-// TODO: clean up Arduino dependency
-// #include <Arduino.h>
-
 // Access config
 #ifdef HPW5500_EXPOSE_ALL
     #define HPW5500_SECURE_PROPS                            public
@@ -92,6 +89,9 @@ class HPW5500 {
     HPW5500_SECURE_METHODS: uint8_t freeSockets();
     HPW5500_SECURE_METHODS: uint16_t portAutoSelect();
     public: uint8_t socketStatus(uint8_t socket);
+    public: void dropSocket(uint8_t socket);
+    public: void reopenSocket(uint8_t socket);
+    HPW5500_SECURE_METHODS: void waitForCmdDone(uint8_t socket);
 
     public: HPW5500_socket_handle_t killAll();
 
@@ -113,8 +113,9 @@ class HPW5500 {
     public: void writePacket(uint8_t socket, uint8_t *data, uint16_t length);
     public: uint16_t currentPacketSize(uint8_t socket);
     public: uint16_t bufferSize(uint8_t socket);
+    public: uint16_t txFreeSize(uint8_t socket);
     public: bool sendPacket(uint8_t socket, uint8_t *ip = nullptr, uint16_t port = 0);
-    public: bool waitForSend(uint8_t socket, uint32_t max_polls = 200000);
+    public: bool waitForSend(uint8_t socket, uint32_t timeout_ms = 200);
     HPW5500_SECURE_METHODS: HPW5500_socketProtocol_t socketProtocol(uint8_t socket);
 
     /** 

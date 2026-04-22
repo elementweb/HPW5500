@@ -1,6 +1,7 @@
 #include "HPW5500WebSocketServer.h"
 
 #include <cstdio>
+#include <cstdlib>
 
 HPW5500WebSocketServer *HPW5500WebSocketServer::instance_by_socket[HPW5500_SOCKET_MAX] = { nullptr };
 
@@ -41,11 +42,7 @@ namespace {
 
 HPW5500WebSocketServer::HPW5500WebSocketServer(HPW5500 *device, uint16_t max_frame) {
     this->device = device;
-    if(max_frame == 0 || max_frame > HPW5500_WS_MAX_FRAME) {
-        this->max_frame = HPW5500_WS_MAX_FRAME;
-    } else {
-        this->max_frame = max_frame;
-    }
+    this->max_frame = (max_frame == 0) ? HPW5500_WS_MAX_FRAME : max_frame;
 }
 
 bool HPW5500WebSocketServer::begin(uint16_t port, uint8_t socket_count) {
@@ -132,6 +129,26 @@ bool HPW5500WebSocketServer::sendClose(uint8_t socket) {
     return sendFrame(socket, 0x8, status, 2, false);
 }
 
+void HPW5500WebSocketServer::forceDisconnect(uint8_t socket) {
+    if(device == nullptr || socket >= HPW5500_SOCKET_MAX) return;
+    if(((socket_handle >> socket) & 0x1) != 0x1) return;
+
+
+    // Clean up WebSocket state
+    if(connections[socket].handshake_done) {
+        if(disconnect_callback != nullptr) disconnect_callback(socket);
+    }
+    connections[socket] = ConnectionState();
+
+    // Force TCP close and re-open for new connections
+    device->dropSocket(socket);
+    device->reopenSocket(socket);
+}
+
+void HPW5500WebSocketServer::setBestEffort(bool enabled) {
+    best_effort = enabled;
+}
+
 void HPW5500WebSocketServer::handlePacket(uint8_t socket, HPW5500_packet_t packet) {
     if(socket >= HPW5500_SOCKET_MAX) return;
 
@@ -153,7 +170,34 @@ void HPW5500WebSocketServer::processPacket(uint8_t socket, const HPW5500_packet_
         return;
     }
 
-    handleFrame(socket, packet.payload, packet.length);
+    const uint8_t *data;
+    uint16_t length;
+    uint8_t *combined = nullptr;
+
+    if(state.tcp_buf_len > 0) {
+        length = state.tcp_buf_len + packet.length;
+        combined = static_cast<uint8_t *>(std::malloc(length));
+        if(combined == nullptr) { state.tcp_buf_len = 0; return; }
+        std::memcpy(combined, state.tcp_buf, state.tcp_buf_len);
+        std::memcpy(combined + state.tcp_buf_len, packet.payload, packet.length);
+        data = combined;
+        state.tcp_buf_len = 0;
+    } else {
+        data = packet.payload;
+        length = packet.length;
+    }
+
+    uint16_t consumed = handleFrame(socket, data, length);
+
+    uint16_t remaining = length - consumed;
+    if(remaining > 0 && remaining <= sizeof(state.tcp_buf) && state.handshake_done) {
+        std::memcpy(state.tcp_buf, data + consumed, remaining);
+        state.tcp_buf_len = remaining;
+    } else {
+        state.tcp_buf_len = 0;
+    }
+
+    std::free(combined);
 }
 
 bool HPW5500WebSocketServer::handleHandshake(uint8_t socket, const uint8_t *data, uint16_t length) {
@@ -212,11 +256,13 @@ bool HPW5500WebSocketServer::handleHandshake(uint8_t socket, const uint8_t *data
     return true;
 }
 
-bool HPW5500WebSocketServer::handleFrame(uint8_t socket, const uint8_t *data, uint16_t length) {
+uint16_t HPW5500WebSocketServer::handleFrame(uint8_t socket, const uint8_t *data, uint16_t length) {
     uint16_t offset = 0;
     ConnectionState &state = connections[socket];
 
     while(offset + 2 <= length) {
+        uint16_t frame_start = offset;
+
         uint8_t b0 = data[offset++];
         uint8_t b1 = data[offset++];
 
@@ -226,25 +272,25 @@ bool HPW5500WebSocketServer::handleFrame(uint8_t socket, const uint8_t *data, ui
         uint64_t payload_len = b1 & 0x7F;
 
         if(payload_len == 126) {
-            if(offset + 2 > length) return false;
+            if(offset + 2 > length) return frame_start;
             payload_len = static_cast<uint16_t>(data[offset] << 8 | data[offset + 1]);
             offset += 2;
         } else if(payload_len == 127) {
-            return false;
+            return length;
         }
 
-        if(payload_len > max_frame) return false;
+        if(payload_len > max_frame) return length;
 
         uint8_t mask_key[4] = { 0, 0, 0, 0 };
         if(masked) {
-            if(offset + 4 > length) return false;
+            if(offset + 4 > length) return frame_start;
             std::memcpy(mask_key, &data[offset], 4);
             offset += 4;
         } else {
-            return false;
+            return length;
         }
 
-        if(offset + payload_len > length) return false;
+        if(offset + payload_len > length) return frame_start;
 
         uint8_t payload[HPW5500_WS_MAX_FRAME];
         for(uint16_t i = 0; i < payload_len; i++) {
@@ -256,7 +302,7 @@ bool HPW5500WebSocketServer::handleFrame(uint8_t socket, const uint8_t *data, ui
             sendClose(socket);
             if(disconnect_callback != nullptr) disconnect_callback(socket);
             connections[socket] = ConnectionState();
-            return true;
+            return offset;
         }
 
         if(opcode == 0x9) {
@@ -268,14 +314,14 @@ bool HPW5500WebSocketServer::handleFrame(uint8_t socket, const uint8_t *data, ui
 
         uint8_t message_opcode = opcode;
         if(opcode == 0x0) {
-            if(state.frag_opcode == 0) return false;
+            if(state.frag_opcode == 0) return length;
             message_opcode = state.frag_opcode;
         } else if(!fin) {
             state.frag_opcode = opcode;
         }
 
         if(!fin) {
-            if(state.frag_len + payload_len > max_frame) return false;
+            if(state.frag_len + payload_len > max_frame) return length;
             std::memcpy(state.frag_buffer + state.frag_len, payload, payload_len);
             state.frag_len += static_cast<uint16_t>(payload_len);
             continue;
@@ -285,7 +331,7 @@ bool HPW5500WebSocketServer::handleFrame(uint8_t socket, const uint8_t *data, ui
         uint16_t message_len = static_cast<uint16_t>(payload_len);
 
         if(state.frag_opcode != 0) {
-            if(state.frag_len + payload_len > max_frame) return false;
+            if(state.frag_len + payload_len > max_frame) return length;
             std::memcpy(state.frag_buffer + state.frag_len, payload, payload_len);
             state.frag_len += static_cast<uint16_t>(payload_len);
             message_ptr = state.frag_buffer;
@@ -297,7 +343,7 @@ bool HPW5500WebSocketServer::handleFrame(uint8_t socket, const uint8_t *data, ui
         if(message_callback != nullptr) message_callback(socket, message_opcode == 0x2, message_ptr, message_len);
     }
 
-    return true;
+    return offset;
 }
 
 const char *HPW5500WebSocketServer::getPath(uint8_t socket) const {
@@ -315,6 +361,37 @@ const char *HPW5500WebSocketServer::getCookie(uint8_t socket) const {
 bool HPW5500WebSocketServer::sendFrame(uint8_t socket, uint8_t opcode, const uint8_t *data, uint16_t length, bool mask) {
     if(device == nullptr) return false;
     if(length > max_frame) return false;
+
+    // Bail early if socket is no longer ESTABLISHED (prevents ghost TX_WR advance)
+    uint8_t sr = device->socketStatus(socket);
+    // Retry once on invalid SPI read (0xFF is never a valid W5500 SR value)
+    if(sr == 0xFF) sr = device->socketStatus(socket);
+    if(sr != 0x17) {
+        return false;
+    }
+
+    // Total bytes: header (2-4) + mask (0 or 4) + payload
+    uint16_t total = 2 + (length > 125 ? 2 : 0) + (mask ? 4 : 0) + length;
+    uint16_t free = device->txFreeSize(socket);
+    if(free < total) {
+        if(best_effort) {
+            // No space — return immediately so the event loop can process TCP ACKs
+            return false;
+        } else {
+            // Reliable mode: poll up to 100ms
+            for(uint16_t i = 0; i < 100; i++) {
+                sr = device->socketStatus(socket);
+                if(sr != 0x17) {
+                    return false;
+                }
+                free = device->txFreeSize(socket);
+                if(free >= total) break;
+            }
+            if(free < total) {
+                return false;
+            }
+        }
+    }
 
     uint8_t header[10];
     uint16_t header_len = 0;
@@ -343,13 +420,22 @@ bool HPW5500WebSocketServer::sendFrame(uint8_t socket, uint8_t opcode, const uin
 
     if(data != nullptr && length > 0) {
         if(mask) {
-            uint8_t masked[HPW5500_WS_MAX_FRAME];
+            uint8_t *masked = new uint8_t[length];
             for(uint16_t i = 0; i < length; i++) masked[i] = data[i] ^ mask_key[i % 4];
             device->writePacket(socket, masked, length);
+            delete[] masked;
         } else {
             device->writePacket(socket, const_cast<uint8_t *>(data), length);
         }
     }
 
-    return device->sendPacket(socket);
+    if(!device->sendPacket(socket)) {
+        return false;
+    }
+    if(best_effort) {
+        // Skip ACK wait — W5500 handles retransmits internally
+        return true;
+    }
+    bool ok = device->waitForSend(socket, 200);
+    return ok;
 }

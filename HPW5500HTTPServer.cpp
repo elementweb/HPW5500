@@ -32,9 +32,11 @@ HPW5500HTTPServer::HPW5500HTTPServer(HPW5500 *device) {
     this->device = device;
 }
 
-bool HPW5500HTTPServer::begin(uint16_t port, uint8_t count) {
+bool HPW5500HTTPServer::begin(uint16_t port, uint8_t count, uint32_t idle_ms) {
     if(device == nullptr || !device->connected()) return false;
     if(count < 1 || count > HPW5500_SOCKET_MAX) count = 1;
+
+    _idle_ms = idle_ms;
 
     HPW5500_socket_handle_t handle = 0x00;
     HPW5500_socket_init_attempt_t result = device->open(&handle, HPW5500_SOCKET_PROTOCOL_TCP, port, count, true);
@@ -59,6 +61,7 @@ void HPW5500HTTPServer::end() {
 
     for(uint8_t i = 0; i < socket_count; i++) {
         uint8_t s = socket_indices[i];
+        cancelIdleTimer(s);
         device->swapMessageCallback(s, previous_callbacks[i]);
         instance_by_socket[s] = nullptr;
     }
@@ -70,6 +73,36 @@ void HPW5500HTTPServer::end() {
 
 void HPW5500HTTPServer::attach(HPW5500 *device) {
     this->device = device;
+}
+
+void HPW5500HTTPServer::setTimerCallbacks(HPW5500_http_schedule_t schedule, HPW5500_http_cancel_t cancel) {
+    _schedule_fn = schedule;
+    _cancel_fn   = cancel;
+}
+
+void HPW5500HTTPServer::cancelIdleTimer(uint8_t socket) {
+    if(_cancel_fn && idle_tokens[socket]) {
+        _cancel_fn(idle_tokens[socket]);
+        idle_tokens[socket] = nullptr;
+    }
+}
+
+void HPW5500HTTPServer::scheduleIdleTimer(uint8_t socket) {
+    if(_schedule_fn) {
+        idle_tokens[socket] = _schedule_fn(_idle_ms, HPW5500HTTPServer::onIdleTimer, reinterpret_cast<void *>(static_cast<uintptr_t>(socket)));
+    }
+}
+
+void HPW5500HTTPServer::onIdleTimer(void *arg) {
+    uint8_t socket = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(arg));
+    if(socket >= HPW5500_SOCKET_MAX) return;
+
+    HPW5500HTTPServer *instance = instance_by_socket[socket];
+    if(instance == nullptr) return;
+
+    instance->idle_tokens[socket] = nullptr;
+    HPW5500_socket_handle_t handle = HPW5500_SOCKET_AS_HANDLE(socket);
+    instance->device->disconnect(&handle);
 }
 
 bool HPW5500HTTPServer::addRoute(HPW5500HttpMethod method, const char *path, HPW5500_http_handler_t handler) {
@@ -106,18 +139,19 @@ void HPW5500HTTPServer::registerExampleRoutes() {
     });
 }
 
-bool HPW5500HTTPServer::sendResponse(uint8_t socket, uint16_t status_code, const char *content_type, const uint8_t *body, uint16_t body_length, const char *extra_headers) {
+bool HPW5500HTTPServer::sendResponse(uint8_t socket, uint16_t status_code, const char *content_type, const uint8_t *body, uint16_t body_length, const char *extra_headers, bool keepAlive) {
     if(device == nullptr) return false;
 
     const char *status_text = statusText(status_code);
     char header[384];
     int header_len = std::snprintf(header, sizeof(header),
-        "HTTP/1.1 %u %s\r\nContent-Length: %u\r\nContent-Type: %s\r\n%sConnection: close\r\n\r\n",
+        "HTTP/1.1 %u %s\r\nContent-Length: %u\r\nContent-Type: %s\r\n%s%s\r\n",
         status_code,
         status_text,
         static_cast<unsigned>(body_length),
         content_type != nullptr ? content_type : "text/plain",
-        extra_headers != nullptr ? extra_headers : "");
+        extra_headers != nullptr ? extra_headers : "",
+        keepAlive ? "Connection: keep-alive\r\nKeep-Alive: timeout=5\r\n" : "Connection: close\r\n");
 
     if(header_len <= 0) return false;
 
@@ -153,8 +187,12 @@ bool HPW5500HTTPServer::sendResponse(uint8_t socket, uint16_t status_code, const
 
     device->waitForSend(socket);
 
-    HPW5500_socket_handle_t handle = HPW5500_SOCKET_AS_HANDLE(socket);
-    device->disconnect(&handle);
+    if(keepAlive) {
+        scheduleIdleTimer(socket);
+    } else {
+        HPW5500_socket_handle_t handle = HPW5500_SOCKET_AS_HANDLE(socket);
+        device->disconnect(&handle);
+    }
 
     return true;
 }
@@ -182,6 +220,9 @@ void HPW5500HTTPServer::handlePacket(uint8_t socket, HPW5500_packet_t packet) {
 }
 
 void HPW5500HTTPServer::processPacket(uint8_t socket, const HPW5500_packet_t &packet) {
+    // New request on a keep-alive connection: cancel pending idle timer
+    cancelIdleTimer(socket);
+
     if(packet.length == 0 || packet.length > HPW5500_HTTP_MAX_REQUEST) {
         sendBadRequest(socket);
         return;
