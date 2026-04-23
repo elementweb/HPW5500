@@ -80,12 +80,12 @@ class HPW5500 {
     HPW5500_SECURE_PROPS: HPW5500_socket_t sockets[HPW5500_SOCKET_MAX];
 
     public: bool configureSocket(uint8_t number, HPW5500_socketProtocol_t protocol, uint16_t port, bool MULTI_MFEN = false, bool BCASTB = false, bool ND_MC_MMB = false, bool UCASTB_MIP6B = false, bool force = false);
-    public: HPW5500_socket_init_attempt_t open(HPW5500_socket_handle_t *handle, HPW5500_socketProtocol_t protocol, uint16_t port = HPW5500_PORT_AUTOSELECT, uint8_t socketCount = 1, bool reopen_on_closed = true);
+    public: HPW5500_socket_init_attempt_t open(HPW5500_socket_handle_t *handle, HPW5500_socketProtocol_t protocol, uint16_t port = HPW5500_PORT_AUTOSELECT, uint8_t socketCount = 1, bool reopen_on_closed = true, uint8_t socket_mask = 0xFF);
     public: HPW5500_socket_handle_t close(HPW5500_socket_handle_t *handle);
     public: HPW5500_socket_init_attempt_t connect(HPW5500_socket_handle_t *handle, uint8_t *ip, uint16_t port, bool reconnect_on_closed = false, bool reconnect_on_timeout = true, uint8_t reconnect_on_close_x = 3, uint8_t reconnect_on_timeout_x = 3, uint16_t local_port = HPW5500_PORT_AUTOSELECT);
     public: HPW5500_socket_handle_t disconnect(HPW5500_socket_handle_t *handle);
 
-    HPW5500_SECURE_METHODS: uint16_t selectFreeSockets(uint8_t socketCount = 1, bool macRaw = false);
+    HPW5500_SECURE_METHODS: uint16_t selectFreeSockets(uint8_t socketCount = 1, bool macRaw = false, uint8_t socket_mask = 0xFF);
     HPW5500_SECURE_METHODS: uint8_t freeSockets();
     HPW5500_SECURE_METHODS: uint16_t portAutoSelect();
     public: uint8_t socketStatus(uint8_t socket);

@@ -375,7 +375,7 @@ bool HPW5500::configureSocket(uint8_t number, HPW5500_socketProtocol_t protocol,
     return false;
 }
 
-HPW5500_socket_init_attempt_t HPW5500::open(HPW5500_socket_handle_t *handle, HPW5500_socketProtocol_t protocol, uint16_t port, uint8_t socketCount, bool reopen_on_closed) {
+HPW5500_socket_init_attempt_t HPW5500::open(HPW5500_socket_handle_t *handle, HPW5500_socketProtocol_t protocol, uint16_t port, uint8_t socketCount, bool reopen_on_closed, uint8_t socket_mask) {
     // Excuse me?
     if(protocol == HPW5500_SOCKET_PROTOCOL_CLOSED) return HPW5500_SOCKET_OPEN_FAILED_CONFIGURATION;
     
@@ -385,8 +385,8 @@ HPW5500_socket_init_attempt_t HPW5500::open(HPW5500_socket_handle_t *handle, HPW
     // UDP and MACRAW can't be opened on multiple sockets at once
     if((protocol == HPW5500_SOCKET_PROTOCOL_UDP || protocol == HPW5500_SOCKET_PROTOCOL_MACRAW) && socketCount > 1) return HPW5500_SOCKET_OPEN_FAILED_MACRAW_UDP_MULTIPLE_SOCKETS;
 
-    // Select free sockets
-    uint16_t free_sockets = selectFreeSockets(socketCount, protocol == HPW5500_SOCKET_PROTOCOL_MACRAW);
+    // Select free sockets (restricted to socket_mask if provided)
+    uint16_t free_sockets = selectFreeSockets(socketCount, protocol == HPW5500_SOCKET_PROTOCOL_MACRAW, socket_mask);
     uint8_t opened_socket_count = 0;
 
     // Won't do. All sockets are busy at the moment
@@ -545,7 +545,7 @@ HPW5500_socket_handle_t HPW5500::disconnect(HPW5500_socket_handle_t *handle) {
     return disconnected_sockets;
 }
 
-uint16_t HPW5500::selectFreeSockets(uint8_t socketCount, bool macRaw) {
+uint16_t HPW5500::selectFreeSockets(uint8_t socketCount, bool macRaw, uint8_t allowed_mask) {
     // MACRAW can only operate on socket 0
     if(macRaw && socketCount != 1) return HPW5500_MACRAW_ONLY_SOCKET_0;
 
@@ -558,6 +558,8 @@ uint16_t HPW5500::selectFreeSockets(uint8_t socketCount, bool macRaw) {
 
     // Iterate through all other sockets [7 → 0] and return the first one that is free
     for(int8_t socket=HPW5500_SOCKET_MAX-1; socket>=0; socket--) {
+        // Skip sockets not in the allowed mask
+        if(!((allowed_mask >> socket) & 0x1)) continue;
         // Check if socket is free/closed
         if(socketStatus(socket) == HPW5500_SOCKET_STATUS::CLOSED) {
             // Mark socket as selected and increment available counter

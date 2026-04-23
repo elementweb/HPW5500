@@ -16,6 +16,7 @@ class HPW5500WebSocketServer {
     public: explicit HPW5500WebSocketServer(HPW5500 *device = nullptr, uint16_t max_frame = 2048);
 
     public: bool begin(uint16_t port, uint8_t socket_count = 1);
+    public: bool begin(uint16_t port, uint8_t socket_count, uint8_t socket_mask);
     public: void end();
     public: void attach(HPW5500 *device);
 

@@ -76,6 +76,35 @@ bool HPW5500WebSocketServer::begin(uint16_t port, uint8_t socket_count) {
     return true;
 }
 
+bool HPW5500WebSocketServer::begin(uint16_t port, uint8_t socket_count, uint8_t socket_mask) {
+    if(device == nullptr || !device->connected()) return false;
+    if(socket_count == 0 || socket_mask == 0) return false;
+
+    HPW5500_socket_handle_t handle = 0x00;
+    HPW5500_socket_init_attempt_t result = device->open(&handle, HPW5500_SOCKET_PROTOCOL_TCP, port, socket_count, true, socket_mask);
+    if(result != HPW5500_SOCKET_OPEN_SUCCESS && result != HPW5500_SOCKET_OPEN_PARTIAL_SUCCESS) return false;
+
+    socket_handle = handle;
+    for(uint8_t socket = 0; socket < HPW5500_SOCKET_MAX; socket++) {
+        if(((handle >> socket) & 0x1) != 0x1) continue;
+        previous_callbacks[socket] = device->swapMessageCallback(socket, HPW5500WebSocketServer::handlePacket);
+        instance_by_socket[socket] = this;
+        connections[socket] = ConnectionState();
+    }
+
+    device->onDisconnect(&socket_handle, [](uint8_t socket) {
+        if(socket >= HPW5500_SOCKET_MAX) return;
+        HPW5500WebSocketServer *inst = instance_by_socket[socket];
+        if(inst == nullptr) return;
+        if(inst->connections[socket].handshake_done) {
+            if(inst->disconnect_callback != nullptr) inst->disconnect_callback(socket);
+        }
+        inst->connections[socket] = ConnectionState();
+    });
+
+    return true;
+}
+
 void HPW5500WebSocketServer::end() {
     if(device == nullptr || socket_handle == 0x00) return;
 

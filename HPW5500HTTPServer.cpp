@@ -56,6 +56,31 @@ bool HPW5500HTTPServer::begin(uint16_t port, uint8_t count, uint32_t idle_ms) {
     return true;
 }
 
+bool HPW5500HTTPServer::begin(uint16_t port, uint8_t count, uint32_t idle_ms, uint8_t socket_mask) {
+    if(device == nullptr || !device->connected()) return false;
+    if(count < 1 || count > HPW5500_SOCKET_MAX) count = 1;
+    if(socket_mask == 0) return false;
+
+    _idle_ms = idle_ms;
+
+    HPW5500_socket_handle_t handle = 0x00;
+    HPW5500_socket_init_attempt_t result = device->open(&handle, HPW5500_SOCKET_PROTOCOL_TCP, port, count, true, socket_mask);
+    if(result != HPW5500_SOCKET_OPEN_SUCCESS && result != HPW5500_SOCKET_OPEN_PARTIAL_SUCCESS) return false;
+
+    socket_handle = handle;
+    socket_count = 0;
+
+    for(uint8_t s = 0; s < HPW5500_SOCKET_MAX; s++) {
+        if(!((handle >> s) & 0x01)) continue;
+        socket_indices[socket_count] = s;
+        previous_callbacks[socket_count] = device->swapMessageCallback(s, HPW5500HTTPServer::handlePacket);
+        instance_by_socket[s] = this;
+        socket_count++;
+    }
+
+    return true;
+}
+
 void HPW5500HTTPServer::end() {
     if(device == nullptr || socket_count == 0) return;
 

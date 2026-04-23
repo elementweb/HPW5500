@@ -40,6 +40,7 @@ class HPW5500HTTPServer {
     public: explicit HPW5500HTTPServer(HPW5500 *device = nullptr);
 
     public: bool begin(uint16_t port, uint8_t socket_count = 1, uint32_t idle_ms = 3000);
+    public: bool begin(uint16_t port, uint8_t socket_count, uint32_t idle_ms, uint8_t socket_mask);
     public: void end();
     public: void attach(HPW5500 *device);
     public: void setTimerCallbacks(HPW5500_http_schedule_t schedule, HPW5500_http_cancel_t cancel);
