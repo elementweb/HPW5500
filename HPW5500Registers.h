@@ -530,9 +530,9 @@
 #define HPW5500_BLOCK_SN_TOS(s)                                             HPW5500_REGISTER_BLOCK_SOCK(s)
 #define HPW5500_COM_SN_TOS(s)                                               HPW5500_ADDR_SN_TOS, HPW5500_BLOCK_SN_TOS(s)
 #define HPW5500_LENGTH_SN_TOS                                               1
-#define HPW5500_DEFAULT_SN_MSSR                                             0x00
-#define HPW5500_USABLE_SN_MSSR                                              0xFF
-#define HPW5500_READONLY_SN_MSSR                                            false
+#define HPW5500_DEFAULT_SN_TOS                                              0x00
+#define HPW5500_USABLE_SN_TOS                                               0xFF
+#define HPW5500_READONLY_SN_TOS                                             false
 
 #define HPW5500_MASK_SN_TOS                                                 0xFF // 8 bits
 
