@@ -25,10 +25,14 @@ struct HPW5500HttpRequest {
     uint16_t body_length = 0;
     const uint8_t *raw = nullptr;
     uint16_t raw_length = 0;
+    uint32_t content_length = 0; // parsed from Content-Length header
 };
 
 class HPW5500HTTPServer {
     public: typedef void (*HPW5500_http_handler_t)(uint8_t socket, const HPW5500HttpRequest &request, HPW5500HTTPServer *server);
+    // Stream handler — called once per TCP chunk while streaming a large POST body.
+    // offset = bytes already delivered before this chunk; done = true on last chunk.
+    public: typedef void (*HPW5500_http_stream_t)(uint8_t socket, const uint8_t *data, uint16_t len, uint32_t offset, uint32_t total, bool done, HPW5500HTTPServer *server);
 
     // Opaque token returned by schedule_fn and passed back to cancel_fn.
     // schedule_fn(delay_ms, cb, arg): schedules cb(arg) after delay_ms; returns token.
@@ -53,6 +57,10 @@ class HPW5500HTTPServer {
     public: bool sendText(uint8_t socket, uint16_t status_code, const char *text);
     public: bool sendNotFound(uint8_t socket);
     public: bool sendBadRequest(uint8_t socket);
+    // Register a streaming handler for large POST bodies. Call from inside a route handler
+    // BEFORE returning. Subsequent TCP data on this socket bypasses HTTP parsing and goes
+    // directly to handler until 'total' bytes have been delivered.
+    public: void beginStream(uint8_t socket, uint32_t total, HPW5500_http_stream_t handler);
 
     private: struct Route {
         bool used = false;
@@ -62,7 +70,7 @@ class HPW5500HTTPServer {
     };
 
     private: static constexpr uint16_t HPW5500_HTTP_MAX_REQUEST = 1024;
-    private: static constexpr uint8_t  HPW5500_HTTP_MAX_ROUTES  = 8;
+    private: static constexpr uint8_t  HPW5500_HTTP_MAX_ROUTES  = 16;
 
     private: static void handlePacket(uint8_t socket, HPW5500_packet_t packet);
     private: static void onIdleTimer(void *arg);
@@ -89,6 +97,14 @@ class HPW5500HTTPServer {
     private: HPW5500_http_schedule_t _schedule_fn = nullptr;
     private: HPW5500_http_cancel_t   _cancel_fn   = nullptr;
     private: HPW5500_http_timer_token_t idle_tokens[HPW5500_SOCKET_MAX] = { };
+
+    private: struct SocketStream {
+        bool active = false;
+        HPW5500_http_stream_t handler = nullptr;
+        uint32_t total = 0;
+        uint32_t received = 0;
+    };
+    private: SocketStream streams[HPW5500_SOCKET_MAX];
 
     private: static HPW5500HTTPServer *instance_by_socket[HPW5500_SOCKET_MAX];
 };

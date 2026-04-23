@@ -235,6 +235,14 @@ bool HPW5500HTTPServer::sendBadRequest(uint8_t socket) {
     return sendText(socket, 400, "Bad Request");
 }
 
+void HPW5500HTTPServer::beginStream(uint8_t socket, uint32_t total, HPW5500_http_stream_t handler) {
+    if(socket >= HPW5500_SOCKET_MAX || handler == nullptr || total == 0) return;
+    streams[socket].active   = true;
+    streams[socket].handler  = handler;
+    streams[socket].total    = total;
+    streams[socket].received = 0;
+}
+
 void HPW5500HTTPServer::handlePacket(uint8_t socket, HPW5500_packet_t packet) {
     if(socket >= HPW5500_SOCKET_MAX) return;
 
@@ -247,6 +255,16 @@ void HPW5500HTTPServer::handlePacket(uint8_t socket, HPW5500_packet_t packet) {
 void HPW5500HTTPServer::processPacket(uint8_t socket, const HPW5500_packet_t &packet) {
     // New request on a keep-alive connection: cancel pending idle timer
     cancelIdleTimer(socket);
+
+    // Active streaming socket — bypass HTTP parsing and feed data to stream handler
+    if(streams[socket].active) {
+        uint32_t offset = streams[socket].received;
+        streams[socket].received += packet.length;
+        bool done = (streams[socket].received >= streams[socket].total);
+        if(done) streams[socket].active = false;
+        streams[socket].handler(socket, packet.payload, packet.length, offset, streams[socket].total, done, this);
+        return;
+    }
 
     if(packet.length == 0 || packet.length > HPW5500_HTTP_MAX_REQUEST) {
         sendBadRequest(socket);
@@ -310,6 +328,16 @@ bool HPW5500HTTPServer::parseRequest(const uint8_t *buffer, uint16_t length, HPW
             std::memcpy(request.cookie, ck, ck_len);
             request.cookie[ck_len] = '\0';
         }
+    }
+
+    // Extract Content-Length header
+    request.content_length = 0;
+    const char *cl = std::strstr(data, "Content-Length:");
+    if(cl == nullptr) cl = std::strstr(data, "content-length:");
+    if(cl != nullptr) {
+        cl += 15;
+        while(*cl == ' ') cl++;
+        request.content_length = static_cast<uint32_t>(std::atol(cl));
     }
 
     const char *body_start = std::strstr(data, "\r\n\r\n");
