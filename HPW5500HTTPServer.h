@@ -69,7 +69,7 @@ class HPW5500HTTPServer {
         HPW5500_http_handler_t handler = nullptr;
     };
 
-    private: static constexpr uint16_t HPW5500_HTTP_MAX_REQUEST = 1024;
+    private: static constexpr uint16_t HPW5500_HTTP_MAX_REQUEST = 1514;
     private: static constexpr uint8_t  HPW5500_HTTP_MAX_ROUTES  = 16;
 
     private: static void handlePacket(uint8_t socket, HPW5500_packet_t packet);
